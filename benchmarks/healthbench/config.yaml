@@ -1,0 +1,24 @@
+config_paths:
+  - resources_servers/healthbench_rubric/configs/healthbench_rubric.yaml
+
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:judge_base_url,${oc.env:JUDGE_MODEL_API_BASE,http://unset.local/v1}}
+      openai_api_key: ${oc.select:judge_api_key,${oc.env:JUDGE_MODEL_API_KEY,dummy}}
+      openai_model: ${oc.select:judge_model_name,${oc.env:JUDGE_MODEL,unset}}
+      openai_default_headers: {}
+
+healthbench_benchmark_simple_agent:
+  _inherit_from: healthbench_rubric_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: healthbench
+          type: benchmark
+          jsonl_fpath: benchmarks/healthbench/data/healthbench_benchmark.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/healthbench/prepare.py
+          num_repeats: 1
+          license: MIT
