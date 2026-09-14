@@ -10,15 +10,20 @@ judge_model:
       openai_model: ${oc.select:judge_model_name,${oc.env:JUDGE_MODEL,unset}}
       openai_default_headers: {}
 
-healthbench_professional_benchmark_simple_agent:
-  _inherit_from: healthbench_rubric_simple_agent
+healthbench_professional_healthbench_rubric_resources_server:
+  _inherit_from: healthbench_rubric
   resources_servers:
     healthbench_rubric:
       length_adjustment_center: 2000
       length_adjustment_penalty_per_500_chars: 0.0147
       reward_metric: overall_score_length_adjusted
+
+healthbench_professional_benchmark_simple_agent:
+  _inherit_from: healthbench_rubric_simple_agent
   responses_api_agents:
     simple_agent:
+      resources_server:
+        name: healthbench_professional_healthbench_rubric_resources_server
       datasets:
         - name: healthbench_professional
           type: benchmark
