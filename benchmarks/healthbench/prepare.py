@@ -14,7 +14,7 @@ from typing import Any
 if __name__ == "__main__" and __package__ is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from benchmarks.healthbench_rubric.prepare_common import iter_local_records, write_gym_jsonl
+from benchmarks.healthbench_rubric.prepare_common import iter_local_records, load_jsonl, write_gym_jsonl
 
 
 BENCHMARK_DIR = Path(__file__).parent
@@ -40,15 +40,18 @@ def _iter_source_records(data_dir: str | Path, subset: str) -> Iterator[dict[str
         return
 
     try:
-        from datasets import load_dataset
+        from huggingface_hub import hf_hub_download
     except ImportError as error:
         raise RuntimeError(
-            f"{data_dir!r} is not a local path. Install datasets or pass a local HealthBench JSONL path."
+            f"{data_dir!r} is not a local path. Install huggingface_hub or pass a local HealthBench JSONL path."
         ) from error
 
-    dataset = load_dataset(str(data_dir), subset, split="test")
-    for record in dataset:
-        yield dict(record)
+    downloaded = hf_hub_download(
+        repo_id=str(data_dir),
+        filename=source_filename,
+        repo_type="dataset",
+    )
+    yield from load_jsonl(Path(downloaded))
 
 
 def prepare(
