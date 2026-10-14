@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import json
-import tempfile
+import math
 import uuid
 import zipfile
 from collections.abc import Iterable, Iterator
@@ -38,14 +38,16 @@ def load_jsonl(path: Path) -> Iterator[dict[str, Any]]:
 
 
 def records_from_zip(path: Path, source_filename: str) -> Iterator[dict[str, Any]]:
-    with tempfile.TemporaryDirectory(prefix="healthbench-") as tmp:
-        tmp_path = Path(tmp)
-        with zipfile.ZipFile(path) as archive:
-            archive.extractall(tmp_path)
-        matches = list(tmp_path.rglob(source_filename))
-        if not matches:
-            raise FileNotFoundError(f"{source_filename} not found in {path}")
-        yield from load_jsonl(matches[0])
+    with zipfile.ZipFile(path) as archive:
+        matches = [name for name in archive.namelist() if Path(name).name == source_filename]
+        if len(matches) != 1:
+            raise ValueError(f"Expected exactly one {source_filename} in {path}, found {len(matches)}")
+        with archive.open(matches[0]) as stream:
+            for line in stream:
+                record = json.loads(line)
+                if not isinstance(record, dict):
+                    raise TypeError("Expected a JSON object in source archive")
+                yield record
 
 
 def iter_local_records(data_dir: str | Path, source_filename: str) -> Iterator[dict[str, Any]] | None:
@@ -85,6 +87,8 @@ def normalize_conversation(record: dict[str, Any]) -> list[dict[str, str]]:
         if not isinstance(content, str):
             raise TypeError(f"conversation[{index}].content must be a string")
         messages.append({"role": role, "content": content})
+    if not messages or messages[-1]["role"] != "user":
+        raise ValueError("Conversation must end with a user message")
     return messages
 
 
@@ -108,17 +112,13 @@ def normalize_rubrics(record: dict[str, Any]) -> list[dict[str, Any]]:
             for key, value in rubric.items()
             if key not in {"criterion", "criterion_text", "rubric", "points", "score"}
         }
-        normalized_rubric.update({"criterion": criterion, "points": float(points)})
+        if isinstance(points, bool) or not isinstance(points, (int, float)) or not math.isfinite(points):
+            raise ValueError(f"rubrics[{index}].points must be finite numeric points")
+        normalized_rubric.update({"criterion": criterion, "points": points})
         normalized.append(normalized_rubric)
+    if not any(rubric["points"] > 0 for rubric in normalized):
+        raise ValueError("Rubrics have no positive points")
     return normalized
-
-
-def conversation_prompt(messages: Iterable[dict[str, str]]) -> str:
-    rendered = "\n\n".join(f"{message['role']}: {message['content']}" for message in messages)
-    return (
-        "Continue the following clinical conversation. Produce only the assistant response "
-        f"to the final user message.\n\n{rendered}"
-    )
 
 
 def to_gym_row(record: dict[str, Any], row_number: int, *, benchmark_name: str) -> dict[str, Any]:
@@ -141,16 +141,14 @@ def to_gym_row(record: dict[str, Any], row_number: int, *, benchmark_name: str) 
     metadata["source_id"] = source_id
     metadata["benchmark_name"] = benchmark_name
 
-    prompt = conversation_prompt(conversation)
     return {
         "uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{benchmark_name}/{source_id}")),
         "source_id": source_id,
         "conversation": conversation,
         "rubrics": rubrics,
         "metadata": metadata,
-        "prompt": prompt,
         "responses_create_params": {
-            "input": [{"role": "user", "content": prompt}],
+            "input": conversation,
             "parallel_tool_calls": False,
             "tools": [],
         },
@@ -164,6 +162,8 @@ def write_gym_jsonl(
     benchmark_name: str,
     limit: int | None = None,
 ) -> Path:
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be positive")
     output.parent.mkdir(parents=True, exist_ok=True)
     tmp_fpath = output.with_suffix(".jsonl.tmp")
     count = 0
@@ -171,7 +171,9 @@ def write_gym_jsonl(
         for row_number, record in enumerate(tqdm(records), 1):
             if limit is not None and count >= limit:
                 break
-            stream.write(json.dumps(to_gym_row(record, row_number, benchmark_name=benchmark_name), ensure_ascii=False) + "\n")
+            stream.write(
+                json.dumps(to_gym_row(record, row_number, benchmark_name=benchmark_name), ensure_ascii=False) + "\n"
+            )
             count += 1
 
     tmp_fpath.replace(output)
