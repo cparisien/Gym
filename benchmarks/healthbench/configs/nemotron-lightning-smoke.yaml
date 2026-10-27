@@ -13,10 +13,6 @@ responses_create_params:
   max_output_tokens: 8192
 
 smoke_judge_model_name: azure/openai/gpt-4.1
-judge_model:
-  responses_api_models:
-    openai_model:
-      entrypoint: app.py
-      openai_base_url: https://inference-api.nvidia.com/v1
-      openai_api_key: ${oc.env:NVIDIA_API_KEY}
-      openai_model: ${smoke_judge_model_name}
+judge_base_url: https://inference-api.nvidia.com/v1
+judge_api_key: ${oc.env:NVIDIA_API_KEY}
+judge_model_name: ${smoke_judge_model_name}
