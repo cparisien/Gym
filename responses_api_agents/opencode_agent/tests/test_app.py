@@ -415,6 +415,73 @@ class TestParseOpencodeSession:
         assert root.conversation[0].content[0].text == "kept"
         assert any(gap.code == "agent_artifact_record_unowned" and gap.detail == "m0" for gap in bundle.gaps)
 
+    @pytest.mark.parametrize(
+        "message_data",
+        ["not json", json.dumps({"time": {"created": 0, "completed": 1}}), "owner-missing"],
+        ids=["unreadable-message", "message-without-role", "no-session"],
+    )
+    def test_a_tool_part_left_out_for_its_message_leaves_tool_timing_unknown(self, tmp_path, message_data) -> None:
+        """Its tool is known but cannot be placed, so the tool history read is not complete."""
+        import sqlite3
+
+        part = {
+            "type": "tool",
+            "callID": "c1",
+            "tool": "bash",
+            "state": {"status": "completed", "time": {"start": 1000040000, "end": 1000050000}},
+        }
+        db = _session_db(tmp_path, [("assistant", [part])])
+        con = sqlite3.connect(db)
+        if message_data == "owner-missing":
+            con.execute("update message set session_id = NULL where id = 'm0'")
+            con.execute("update part set session_id = NULL where id = 'p0'")
+        else:
+            con.execute("update message set data = ? where id = 'm0'", (message_data,))
+        con.commit()
+        con.close()
+
+        bundle = _parse_opencode_session(db, "fallback")
+
+        assert _tool_calls(bundle) == []
+        assert ("tool_timing_unavailable", "p0") in [(gap.code, gap.detail) for gap in bundle.gaps]
+
+    @pytest.mark.parametrize("call_id", ["absent", None, ""], ids=["absent", "null", "empty"])
+    def test_a_tool_part_without_a_call_id_leaves_tool_timing_unknown(self, tmp_path, call_id) -> None:
+        """The tool ran but has no observation to time, so the tool history read is not complete."""
+        part = {
+            "type": "tool",
+            "tool": "bash",
+            "state": {"status": "completed", "time": {"start": 1000040000, "end": 1000050000}},
+        }
+        if call_id != "absent":
+            part["callID"] = call_id
+        db = _session_db(tmp_path, [("assistant", [part])])
+
+        bundle = _parse_opencode_session(db, "fallback")
+
+        assert _tool_calls(bundle) == []
+        gaps = [(gap.code, gap.detail) for gap in bundle.gaps]
+        assert ("tool_call_identity_unavailable", "p0") in gaps
+        assert ("tool_timing_unavailable", "p0") in gaps
+
+    def test_an_unreadable_part_leaves_tool_timing_unknown(self, tmp_path) -> None:
+        """The part may have been a tool call, so the tool history read is not complete."""
+        import sqlite3
+
+        db = _session_db(tmp_path, [("assistant", [{"type": "text", "text": "kept"}, {"type": "text", "text": "x"}])])
+        con = sqlite3.connect(db)
+        con.execute("update part set data = 'not json' where id = 'p1'")
+        con.commit()
+        con.close()
+
+        bundle = _parse_opencode_session(db, "fallback")
+
+        assert _invocations(bundle)[0].conversation[0].content[0].text == "kept"
+        assert [(gap.code, gap.detail) for gap in bundle.gaps if gap.code != "tool_outcome_unavailable"] == [
+            ("agent_artifact_record_unparseable", None),
+            ("tool_timing_unavailable", "p1"),
+        ]
+
     def test_reports_invalid_timing_and_unresolved_tree_edges(self, tmp_path) -> None:
         db = _session_db(
             tmp_path,
@@ -803,3 +870,23 @@ def test_gym_provider_preserves_interleaved_override(override: dict, expected: d
     with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
         config = agent._build_opencode_config("1-2")
     assert config["provider"]["nemo"]["models"]["policy"]["interleaved"] == expected
+
+
+@pytest.mark.parametrize("budget,expected", [(None, 1800), ("12.5", 12.5), ("3600", 1800), ("invalid", 1800)])
+async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget: str | None, expected: float) -> None:
+    agent = _make_agent(timeout=1800, workspace_root=str(tmp_path))
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input="task", metadata=None if budget is None else {"agent_timeout_sec": budget}
+    )
+    process = MagicMock(returncode=0)
+    process.communicate = AsyncMock(return_value=(b"", b""))
+    module = "responses_api_agents.opencode_agent.app"
+    with (
+        patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)),
+        patch(f"{module}.asyncio.wait_for", wraps=asyncio.wait_for) as wait,
+    ):
+        episode = await agent._create_episode(body, collect_observations=False)
+    wait.assert_awaited_once()
+    assert wait.await_args.kwargs["timeout"] == expected
+    assert episode.response.metadata == {"agent_timeout_sec": str(float(expected))}
+    assert agent.config.timeout == 1800
