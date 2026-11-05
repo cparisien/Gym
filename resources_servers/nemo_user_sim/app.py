@@ -18,7 +18,21 @@ from typing import Any
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef, get_first_server_config_dict
+from nemo_gym.core import (
+    JUDGE_FAILED,
+    SESSION_EXPIRED,
+    VERIFIER_ERROR,
+    EpisodeId,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseOutputMessage,
+    TaskId,
+    is_namespaced,
+    is_registered,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
@@ -26,16 +40,6 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
     lost_session_verification,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.failure_kinds import JUDGE_FAILED, SESSION_EXPIRED, VERIFIER_ERROR, is_namespaced, is_registered
-from nemo_gym.global_config import get_first_server_config_dict
-from nemo_gym.openai_utils import (
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseOutputMessage,
-)
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimSeedResponse,
     UserSimSimulationResult,
@@ -60,6 +64,8 @@ PROBE_SCORERS = {
     "tool_calling": "tool_use",
 }
 ASSISTANT_QUALITY_AXES = ("helpfulness", "accuracy", "coherence")
+# A failed simulation whose outcome names no failure_class.
+SIMULATION_FAILED = "usersim:simulation_failed"
 logger = logging.getLogger(__name__)
 
 
@@ -284,7 +290,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
                 reward=0.0,
                 mask_sample=False,
                 failure_kind=_usersim_failure_kind(outcome.get("failure_class")),
-                failure_reason=outcome.get("failure_detail") or outcome.get("failure_reason"),
+                failure_reason=_usersim_failure_reason(outcome),
                 reward_components={
                     "participants_completed": float(participants_completed),
                     "conversation_status": float(usersim_result.conversation_status),
@@ -364,8 +370,10 @@ class UserSimResourcesServer(SimpleResourcesServer):
         mask_sample = (simulation_failed and failure_attribution != "assistant_model") or bool(
             scorer_error or evaluator_error or quality_missing or scorer_inconclusive
         )
-        failure_kind = _usersim_failure_kind(outcome.get("failure_class")) if simulation_failed else None
-        failure_reason = outcome.get("failure_detail") if simulation_failed else None
+        failure_kind = (
+            (_usersim_failure_kind(outcome.get("failure_class")) or SIMULATION_FAILED) if simulation_failed else None
+        )
+        failure_reason = _usersim_failure_reason(outcome) if simulation_failed else None
         if scorer_error:
             failure_kind = VERIFIER_ERROR
             failure_reason = str(scorer_error)
@@ -553,6 +561,10 @@ def _usersim_failure_kind(value: Any) -> str | None:
         return name
     normalized = re.sub(r"[^a-z0-9_]+", "_", name.lower()).strip("_") or "simulation_failed"
     return f"usersim:{normalized}"
+
+
+def _usersim_failure_reason(outcome: Mapping[str, Any]) -> str | None:
+    return outcome.get("failure_detail") or outcome.get("failure_reason")
 
 
 def _conversation_roles(result: UserSimSimulationResult) -> set[str]:
